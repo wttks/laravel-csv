@@ -1,0 +1,348 @@
+<?php
+
+namespace Wttks\Csv;
+
+use Illuminate\Support\Collection;
+use Illuminate\Support\LazyCollection;
+use InvalidArgumentException;
+use RuntimeException;
+
+/**
+ * CSV/TSV ファイルまたは文字列の読み込みクラス。
+ *
+ * 使用例:
+ *   // ファイルから読み込み（エンコーディング自動判定）
+ *   $rows = CsvReader::file('data.csv')
+ *       ->map(['氏名' => 'name', '電話番号' => 'phone'])
+ *       ->rows();
+ *
+ *   // ストリーミング読み込み（大きいファイル向け）
+ *   foreach (CsvReader::file('large.csv')->cursor() as $row) {
+ *       // 1行ずつ処理
+ *   }
+ */
+class CsvReader
+{
+    private CsvConfig $config;
+
+    /** ファイルパス（ファイル読み込み時） */
+    private ?string $path = null;
+
+    /** 文字列コンテンツ（文字列読み込み時） */
+    private ?string $content = null;
+
+    /** エンコーディング上書き（nullの場合は自動判定） */
+    private ?string $encoding = null;
+
+    /**
+     * カラムマッピング。
+     * キー: CSVヘッダー名
+     * 値: 出力配列のキー名（文字列）またはクロージャ（値変換）
+     *
+     * @var array<string, string|\Closure>
+     */
+    private array $map = [];
+
+    private function __construct(CsvConfig $config)
+    {
+        $this->config = $config;
+    }
+
+    // =========================================================================
+    // ファクトリメソッド
+    // =========================================================================
+
+    /**
+     * ファイルから読み込む。
+     */
+    public static function file(string $path, ?CsvConfig $config = null): static
+    {
+        if (!file_exists($path)) {
+            throw new InvalidArgumentException("CSVファイルが見つかりません: {$path}");
+        }
+
+        $instance = new static($config ?? new CsvConfig());
+        $instance->path = $path;
+        return $instance;
+    }
+
+    /**
+     * 文字列から読み込む。
+     */
+    public static function string(string $content, ?CsvConfig $config = null): static
+    {
+        $instance = new static($config ?? new CsvConfig());
+        $instance->content = $content;
+        return $instance;
+    }
+
+    // =========================================================================
+    // フルーエント設定
+    // =========================================================================
+
+    public function config(CsvConfig $config): static
+    {
+        $this->config = $config;
+        return $this;
+    }
+
+    public function delimiter(string $delimiter): static
+    {
+        $this->config = $this->config->delimiter($delimiter);
+        return $this;
+    }
+
+    public function enclosure(string $enclosure): static
+    {
+        $this->config = $this->config->enclosure($enclosure);
+        return $this;
+    }
+
+    public function hasHeader(bool $enabled = true): static
+    {
+        $this->config = $this->config->hasHeader($enabled);
+        return $this;
+    }
+
+    /**
+     * エンコーディングを明示指定する（自動判定を上書き）。
+     * 'UTF-8' / 'SJIS-win' / 'eucJP-win' 等
+     */
+    public function encoding(string $encoding): static
+    {
+        $this->encoding = $encoding;
+        return $this;
+    }
+
+    /**
+     * カラムマッピングを設定する。
+     *
+     * キー: CSVヘッダー名
+     * 値: 出力キー名（文字列）または値変換クロージャ（function(string $value): mixed）
+     *
+     * 例:
+     *   ->map([
+     *       '氏名'   => 'name',
+     *       '金額'   => fn($v) => (int) $v,
+     *   ])
+     */
+    public function map(array $map): static
+    {
+        $this->map = $map;
+        return $this;
+    }
+
+    // =========================================================================
+    // 読み込み
+    // =========================================================================
+
+    /**
+     * 全行を Collection として返す。
+     *
+     * @return Collection<int, array<string, mixed>>
+     */
+    public function rows(): Collection
+    {
+        return Collection::make($this->readAll());
+    }
+
+    /**
+     * 1行ずつ処理する LazyCollection を返す（大きいファイル向け）。
+     *
+     * @return LazyCollection<int, array<string, mixed>>
+     */
+    public function cursor(): LazyCollection
+    {
+        return LazyCollection::make(function () {
+            yield from $this->readGenerator();
+        });
+    }
+
+    // =========================================================================
+    // 内部処理
+    // =========================================================================
+
+    /**
+     * 全行を配列として読み込む。
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    private function readAll(): array
+    {
+        return iterator_to_array($this->readGenerator(), false);
+    }
+
+    /**
+     * ジェネレータで1行ずつ読み込む。
+     *
+     * @return \Generator<int, array<string, mixed>>
+     */
+    private function readGenerator(): \Generator
+    {
+        $handle = $this->openHandle();
+
+        try {
+            $headers = null;
+
+            while (true) {
+                $row = fgetcsv($handle, 0, $this->config->delimiter, $this->config->enclosure, $this->config->escape);
+
+                if ($row === false) {
+                    break;
+                }
+
+                // 空行をスキップ
+                if ($row === [null]) {
+                    continue;
+                }
+
+                // ヘッダー行の処理
+                if ($headers === null && $this->config->hasHeader) {
+                    $headers = array_map(
+                        fn(string $h) => $this->stripExcelFormula($h),
+                        $row
+                    );
+                    continue;
+                }
+
+                yield $this->processRow($row, $headers);
+            }
+        } finally {
+            fclose($handle);
+        }
+    }
+
+    /**
+     * ストリームハンドルを開く（エンコーディング変換込み）。
+     *
+     * @return resource
+     */
+    private function openHandle()
+    {
+        // コンテンツを取得（ファイルまたは文字列）
+        if ($this->path !== null) {
+            $raw = file_get_contents($this->path);
+            if ($raw === false) {
+                throw new RuntimeException("CSVファイルの読み込みに失敗しました: {$this->path}");
+            }
+        } else {
+            $raw = $this->content ?? '';
+        }
+
+        // UTF-8 に変換
+        $utf8 = $this->convertToUtf8($raw);
+
+        // メモリストリームに書き込んで返す
+        $handle = fopen('php://memory', 'r+');
+        if ($handle === false) {
+            throw new RuntimeException('メモリストリームのオープンに失敗しました');
+        }
+        fwrite($handle, $utf8);
+        rewind($handle);
+
+        return $handle;
+    }
+
+    /**
+     * 文字列を UTF-8 に変換する。
+     * BOM付きUTF-8 / SJIS-win / eucJP-win を自動判定する。
+     */
+    private function convertToUtf8(string $raw): string
+    {
+        // BOM を除去しつつエンコーディングを特定
+        if (str_starts_with($raw, "\xEF\xBB\xBF")) {
+            // UTF-8 BOM
+            return substr($raw, 3);
+        }
+
+        $encoding = $this->encoding ?? $this->detectEncoding($raw);
+
+        if ($encoding === 'UTF-8' || $encoding === 'ASCII') {
+            return $raw;
+        }
+
+        $converted = mb_convert_encoding($raw, 'UTF-8', $encoding);
+        if ($converted === false) {
+            throw new RuntimeException("エンコーディング変換に失敗しました: {$encoding} → UTF-8");
+        }
+
+        return $converted;
+    }
+
+    /**
+     * エンコーディングを自動判定する。
+     */
+    private function detectEncoding(string $str): string
+    {
+        if ($str === '') {
+            return 'ASCII';
+        }
+
+        $detected = mb_detect_encoding($str, ['ASCII', 'UTF-8', 'SJIS-win', 'eucJP-win'], strict: true);
+
+        return $detected !== false ? $detected : 'UTF-8';
+    }
+
+    /**
+     * 1行分のデータを処理してキー付き配列に変換する。
+     *
+     * @param  string[]               $row
+     * @param  string[]|null          $headers
+     * @return array<string, mixed>
+     */
+    private function processRow(array $row, ?array $headers): array
+    {
+        // Excel数式形式を除去（="0120" → "0120"）
+        $row = array_map(fn(string $v) => $this->stripExcelFormula($v), $row);
+
+        // ヘッダーなし: インデックス配列として返す
+        if ($headers === null) {
+            return $row;
+        }
+
+        // ヘッダーをキーにした連想配列に変換
+        $assoc = [];
+        foreach ($headers as $i => $header) {
+            $assoc[$header] = $row[$i] ?? '';
+        }
+
+        // カラムマッピングが未設定: ヘッダー名をそのままキーに使う
+        if (empty($this->map)) {
+            return $assoc;
+        }
+
+        // カラムマッピングを適用
+        $mapped = [];
+        foreach ($this->map as $csvHeader => $target) {
+            $value = $assoc[$csvHeader] ?? '';
+
+            if ($target instanceof \Closure) {
+                // クロージャの場合は値変換
+                $mapped[$csvHeader] = $target($value);
+            } else {
+                // 文字列の場合は出力キー名
+                $mapped[$target] = $value;
+            }
+        }
+
+        return $mapped;
+    }
+
+    /**
+     * Excel数式形式（="..."）を除去して内側の値を返す。
+     * ="0120" → 0120、通常の値はそのまま返す。
+     */
+    private function stripExcelFormula(string $value): string
+    {
+        if (!$this->config->excelFormula) {
+            return $value;
+        }
+
+        // ="..." 形式にマッチする場合は中身を返す
+        if (preg_match('/\A="(.*)"\z/s', $value, $m)) {
+            return $m[1];
+        }
+
+        return $value;
+    }
+}
