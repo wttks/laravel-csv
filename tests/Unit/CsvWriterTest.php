@@ -184,6 +184,73 @@ class CsvWriterTest extends TestCase
     }
 
     // =========================================================================
+    // open / add / close（分割書き込み）
+    // =========================================================================
+
+    #[Test]
+    public function open_add_closeで分割書き込みができる(): void
+    {
+        $tmpFile = tempnam(sys_get_temp_dir(), 'csv_test_');
+
+        try {
+            $writer = CsvWriter::file($tmpFile, CsvConfig::make()->writeEncoding('UTF-8'))
+                ->map(['氏名' => 'name', '年齢' => 'age'])
+                ->open();
+
+            $writer->add([['name' => '山田太郎', 'age' => '30']]);
+            $writer->add([['name' => '鈴木花子', 'age' => '25']]);
+            $writer->add([['name' => '田中一郎', 'age' => '40']]);
+            $writer->close();
+
+            $rows = CsvReader::file($tmpFile)->rows();
+
+            $this->assertCount(3, $rows);
+            $this->assertSame('山田太郎', $rows[0]['氏名']);
+            $this->assertSame('鈴木花子', $rows[1]['氏名']);
+            $this->assertSame('田中一郎', $rows[2]['氏名']);
+        } finally {
+            unlink($tmpFile);
+        }
+    }
+
+    #[Test]
+    public function addでチャンクごとに書き込める(): void
+    {
+        $tmpFile = tempnam(sys_get_temp_dir(), 'csv_test_');
+
+        try {
+            $writer = CsvWriter::file($tmpFile, CsvConfig::make()->writeEncoding('UTF-8'))
+                ->map(['コード' => 'code', '名前' => 'name'])
+                ->open();
+
+            // 複数チャンクに分けて書き込む
+            $chunk1 = [['code' => '0120', 'name' => 'フリーダイヤル']];
+            $chunk2 = [['code' => '001',  'name' => 'テスト'], ['code' => '1234', 'name' => '通常']];
+            $writer->add($chunk1)->add($chunk2);
+            $writer->close();
+
+            $rows = CsvReader::file($tmpFile)->rows();
+
+            $this->assertCount(3, $rows);
+            $this->assertSame('0120', $rows[0]['コード']);
+            $this->assertSame('001',  $rows[1]['コード']);
+            $this->assertSame('1234', $rows[2]['コード']);
+        } finally {
+            unlink($tmpFile);
+        }
+    }
+
+    #[Test]
+    public function open前にaddを呼ぶと例外が発生する(): void
+    {
+        $this->expectException(\RuntimeException::class);
+
+        CsvWriter::file('/tmp/test.csv')
+            ->map(['氏名' => 'name'])
+            ->add([['name' => '山田']]);
+    }
+
+    // =========================================================================
     // 読み書き往復
     // =========================================================================
 

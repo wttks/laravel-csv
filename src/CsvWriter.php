@@ -7,18 +7,22 @@ use RuntimeException;
 /**
  * CSV/TSV ファイルまたは文字列への書き込みクラス。
  *
- * 使用例:
+ * 一括書き込み:
  *   CsvWriter::file('output.csv')
- *       ->map([
- *           '氏名'     => 'name',
- *           '電話番号' => fn($item) => $item['phone'],
- *       ])
+ *       ->map(['氏名' => 'name', '電話番号' => fn($item) => $item['phone']])
  *       ->write($rows);
  *
- *   // 文字列として取得
- *   $csv = CsvWriter::toString()
- *       ->map(['Name' => 'name'])
- *       ->get($rows);
+ * 分割書き込み（大量データ・チャンク処理向け）:
+ *   $writer = CsvWriter::file('output.csv')
+ *       ->map(['氏名' => 'name'])
+ *       ->open();
+ *
+ *   $writer->add($chunk1);
+ *   $writer->add($chunk2);
+ *   $writer->close();
+ *
+ * 文字列として取得:
+ *   $csv = CsvWriter::toString()->map(['Name' => 'name'])->get($rows);
  */
 class CsvWriter
 {
@@ -35,6 +39,12 @@ class CsvWriter
      * @var array<string, string|\Closure>
      */
     private array $map = [];
+
+    /** open() で開いたファイルハンドル */
+    private mixed $handle = null;
+
+    /** open() / add() による直接書き込みモード中は true */
+    private bool $streaming = false;
 
     private function __construct(CsvConfig $config)
     {
@@ -123,6 +133,90 @@ class CsvWriter
     }
 
     // =========================================================================
+    // 分割書き込み（open / add / close）
+    // =========================================================================
+
+    /**
+     * ファイルを開いてヘッダー行を書き出す。
+     * 以降は add() でデータを追加し、最後に close() で閉じる。
+     *
+     * @return $this
+     */
+    public function open(): static
+    {
+        if ($this->path === null) {
+            throw new RuntimeException('書き込み先ファイルパスが設定されていません。file() を使用してください。');
+        }
+
+        if ($this->handle !== null) {
+            throw new RuntimeException('すでにファイルが開かれています。close() を呼び出してから再度 open() してください。');
+        }
+
+        $handle = fopen($this->path, 'w');
+        if ($handle === false) {
+            throw new RuntimeException("ファイルのオープンに失敗しました: {$this->path}");
+        }
+
+        // UTF-8 BOM を先頭に書き出す
+        if ($this->config->writeEncoding === 'UTF-8-BOM') {
+            fwrite($handle, "\xEF\xBB\xBF");
+        }
+
+        $this->handle = $handle;
+        $this->streaming = true;
+
+        // ヘッダー行を書き出す
+        if ($this->config->hasHeader && !empty($this->map)) {
+            $this->writeLineToHandle($this->handle, array_keys($this->map));
+        }
+
+        return $this;
+    }
+
+    /**
+     * 開いているファイルにデータ行を追加する。
+     * open() を呼び出してから使用すること。
+     *
+     * @param iterable<mixed> $rows Model / 連想配列 / オブジェクトの iterable
+     * @return $this
+     */
+    public function add(iterable $rows): static
+    {
+        if ($this->handle === null) {
+            throw new RuntimeException('ファイルが開かれていません。先に open() を呼び出してください。');
+        }
+
+        foreach ($rows as $item) {
+            $this->writeLineToHandle($this->handle, $this->extractRow($item));
+        }
+
+        return $this;
+    }
+
+    /**
+     * ファイルを閉じる。
+     * open() / add() による分割書き込み後に呼び出すこと。
+     */
+    public function close(): void
+    {
+        if ($this->handle === null) {
+            return;
+        }
+
+        fclose($this->handle);
+        $this->handle = null;
+        $this->streaming = false;
+    }
+
+    /**
+     * close() が呼ばれないままインスタンスが破棄された場合に自動でファイルを閉じる。
+     */
+    public function __destruct()
+    {
+        $this->close();
+    }
+
+    // =========================================================================
     // 書き込み
     // =========================================================================
 
@@ -172,12 +266,12 @@ class CsvWriter
         try {
             // ヘッダー行を書き出す
             if ($this->config->hasHeader && !empty($this->map)) {
-                $this->writeLine($handle, array_keys($this->map));
+                $this->writeLineToHandle($handle, array_keys($this->map));
             }
 
             // データ行を書き出す
             foreach ($rows as $item) {
-                $this->writeLine($handle, $this->extractRow($item));
+                $this->writeLineToHandle($handle, $this->extractRow($item));
             }
 
             rewind($handle);
@@ -196,16 +290,29 @@ class CsvWriter
      * @param resource $handle
      * @param string[] $fields
      */
-    private function writeLine($handle, array $fields): void
+    private function writeLineToHandle($handle, array $fields): void
     {
         // Excel数式形式のフィールドが含まれる場合は手動で行を構築
         $hasFormula = array_any($fields, fn(string $f) => str_starts_with($f, '='));
 
         if ($hasFormula) {
-            fwrite($handle, $this->buildLine($fields));
+            $line = $this->buildLine($fields);
         } else {
-            fputcsv($handle, $fields, $this->config->delimiter, $this->config->enclosure, $this->config->escape);
+            // 一時バッファに fputcsv で書き出して文字列として取得する
+            $tmp = fopen('php://memory', 'r+');
+            fputcsv($tmp, $fields, $this->config->delimiter, $this->config->enclosure, $this->config->escape);
+            rewind($tmp);
+            $line = stream_get_contents($tmp) ?: '';
+            fclose($tmp);
         }
+
+        // ストリーミングモード（open/add）の場合は行単位でエンコーディング変換する
+        // （buildCsvString() 経由の場合は encodeOutput() で後処理するので変換不要）
+        if ($this->streaming && !in_array($this->config->writeEncoding, ['UTF-8', 'UTF-8-BOM'], true)) {
+            $line = mb_convert_encoding($line, $this->config->writeEncoding, 'UTF-8') ?: $line;
+        }
+
+        fwrite($handle, $line);
     }
 
     /**
