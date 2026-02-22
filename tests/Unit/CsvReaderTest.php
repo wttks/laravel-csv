@@ -196,6 +196,70 @@ class CsvReaderTest extends TestCase
     }
 
     // =========================================================================
+    // 列インデックスによるマッピング
+    // =========================================================================
+
+    #[Test]
+    public function 列インデックスで出力キー名を指定できる(): void
+    {
+        $rows = CsvReader::file("{$this->fixtures}/simple_utf8.csv")
+            ->map([
+                0 => 'name',
+                1 => 'phone',
+                2 => 'zip',
+            ])
+            ->rows();
+
+        $this->assertSame('山田太郎', $rows[0]['name']);
+        $this->assertSame('090-1234-5678', $rows[0]['phone']);
+        $this->assertSame('123-4567', $rows[0]['zip']);
+    }
+
+    #[Test]
+    public function 列インデックスとクロージャで値変換できる(): void
+    {
+        $rows = CsvReader::file("{$this->fixtures}/simple_utf8.csv")
+            ->map([
+                0 => 'name',
+                2 => fn($v) => str_replace('-', '', $v),
+            ])
+            ->rows();
+
+        $this->assertSame('山田太郎', $rows[0]['name']);
+        $this->assertSame('1234567', $rows[0][2]); // クロージャの出力キーはインデックス番号
+    }
+
+    #[Test]
+    public function ヘッダーなしファイルを列インデックスでマッピングできる(): void
+    {
+        $rows = CsvReader::file("{$this->fixtures}/simple_utf8.csv")
+            ->hasHeader(false)
+            ->map([
+                0 => 'name',
+                1 => 'phone',
+            ])
+            ->rows();
+
+        // 1行目はヘッダー行がデータとして入る
+        $this->assertSame('氏名', $rows[0]['name']);
+        $this->assertSame('山田太郎', $rows[1]['name']);
+    }
+
+    #[Test]
+    public function ヘッダー名とインデックスを混在させてマッピングできる(): void
+    {
+        $rows = CsvReader::file("{$this->fixtures}/simple_utf8.csv")
+            ->map([
+                '氏名' => 'name',   // ヘッダー名指定
+                2      => 'zip',    // インデックス指定
+            ])
+            ->rows();
+
+        $this->assertSame('山田太郎', $rows[0]['name']);
+        $this->assertSame('123-4567', $rows[0]['zip']);
+    }
+
+    // =========================================================================
     // 空行のスキップ
     // =========================================================================
 

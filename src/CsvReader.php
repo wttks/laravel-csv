@@ -117,13 +117,19 @@ class CsvReader
     /**
      * カラムマッピングを設定する。
      *
-     * キー: CSVヘッダー名
-     * 値: 出力キー名（文字列）または値変換クロージャ（function(string $value): mixed）
+     * キーにはヘッダー名（文字列）または列インデックス（0始まりの整数）を指定できる。
+     * 値には出力キー名（文字列）または値変換クロージャを指定できる。
      *
      * 例:
      *   ->map([
+     *       // ヘッダー名 → 出力キー名
      *       '氏名'   => 'name',
+     *       // ヘッダー名 → 値変換クロージャ（出力キーはヘッダー名のまま）
      *       '金額'   => fn($v) => (int) $v,
+     *       // 列インデックス → 出力キー名
+     *       0 => 'name',
+     *       // 列インデックス → 値変換クロージャ（出力キーはインデックス番号）
+     *       2 => fn($v) => (int) $v,
      *   ])
      */
     public function map(array $map): static
@@ -288,7 +294,7 @@ class CsvReader
      *
      * @param  string[]               $row
      * @param  string[]|null          $headers
-     * @return array<string, mixed>
+     * @return array<string|int, mixed>
      */
     private function processRow(array $row, ?array $headers): array
     {
@@ -297,7 +303,11 @@ class CsvReader
 
         // ヘッダーなし: インデックス配列として返す
         if ($headers === null) {
-            return $row;
+            if (empty($this->map)) {
+                return $row;
+            }
+            // インデックスベースのマッピングを適用
+            return $this->applyMap($row, assoc: null);
         }
 
         // ヘッダーをキーにした連想配列に変換
@@ -311,16 +321,44 @@ class CsvReader
             return $assoc;
         }
 
-        // カラムマッピングを適用
-        $mapped = [];
-        foreach ($this->map as $csvHeader => $target) {
-            $value = $assoc[$csvHeader] ?? '';
+        return $this->applyMap($row, assoc: $assoc);
+    }
 
-            if ($target instanceof \Closure) {
-                // クロージャの場合は値変換
-                $mapped[$csvHeader] = $target($value);
+    /**
+     * カラムマッピングを適用して出力配列を返す。
+     *
+     * map のキーは以下を受け付ける:
+     *   int    $index   → 0始まりの列インデックス（$row[$index] を使用）
+     *   string $header  → CSVヘッダー名（$assoc[$header] を使用）
+     *
+     * map の値は以下を受け付ける:
+     *   string  $outputKey → 出力配列のキー名
+     *   Closure            → 値変換クロージャ（出力キーはソース指定と同じ）
+     *
+     * @param  string[]                    $row    生行データ（インデックス配列）
+     * @param  array<string, string>|null  $assoc  ヘッダーキー付き配列（ヘッダーなしのときnull）
+     * @return array<string|int, mixed>
+     */
+    private function applyMap(array $row, ?array $assoc): array
+    {
+        $mapped = [];
+
+        foreach ($this->map as $source => $target) {
+            // ソースの値を取得
+            if (is_int($source)) {
+                // 整数キー: 列インデックス指定
+                $value = $row[$source] ?? '';
             } else {
-                // 文字列の場合は出力キー名
+                // 文字列キー: ヘッダー名指定
+                $value = $assoc[$source] ?? '';
+            }
+
+            // ターゲットの適用
+            if ($target instanceof \Closure) {
+                // クロージャ: 値変換。出力キーはソース指定をそのまま使う
+                $mapped[$source] = $target($value);
+            } else {
+                // 文字列: 出力キー名の変換
                 $mapped[$target] = $value;
             }
         }
