@@ -4,8 +4,11 @@ namespace Wttks\Csv;
 
 use Illuminate\Support\Collection;
 use Illuminate\Support\LazyCollection;
-use InvalidArgumentException;
-use RuntimeException;
+use Wttks\Csv\Exceptions\CsvEncodingException;
+use Wttks\Csv\Exceptions\CsvFileNotFoundException;
+use Wttks\Csv\Exceptions\CsvFileNotReadableException;
+use Wttks\Csv\Exceptions\CsvMappingException;
+use Wttks\Csv\Exceptions\CsvParseException;
 
 /**
  * CSV/TSV ファイルまたは文字列の読み込みクラス。
@@ -20,9 +23,18 @@ use RuntimeException;
  *   foreach (CsvReader::file('large.csv')->cursor() as $row) {
  *       // 1行ずつ処理
  *   }
+ *
+ * @throws \Wttks\Csv\Exceptions\CsvFileNotFoundException     ファイルが見つからない
+ * @throws \Wttks\Csv\Exceptions\CsvFileNotReadableException  読み取り権限がない
+ * @throws \Wttks\Csv\Exceptions\CsvEncodingException         エンコーディング変換失敗
+ * @throws \Wttks\Csv\Exceptions\CsvParseException            CSV解析エラー
+ * @throws \Wttks\Csv\Exceptions\CsvMappingException          マッピングクロージャの例外
  */
 class CsvReader
 {
+    /** 読み込みエンコーディングとして指定できる値 */
+    private const VALID_ENCODINGS = ['UTF-8', 'SJIS-win', 'eucJP-win', 'ASCII'];
+
     private CsvConfig $config;
 
     /** ファイルパス（ファイル読み込み時） */
@@ -36,10 +48,10 @@ class CsvReader
 
     /**
      * カラムマッピング。
-     * キー: CSVヘッダー名
+     * キー: CSVヘッダー名（文字列）または列インデックス（整数・0始まり）
      * 値: 出力配列のキー名（文字列）またはクロージャ（値変換）
      *
-     * @var array<string, string|\Closure>
+     * @var array<string|int, string|\Closure>
      */
     private array $map = [];
 
@@ -54,11 +66,18 @@ class CsvReader
 
     /**
      * ファイルから読み込む。
+     *
+     * @throws \Wttks\Csv\Exceptions\CsvFileNotFoundException    ファイルが存在しない
+     * @throws \Wttks\Csv\Exceptions\CsvFileNotReadableException 読み取り権限がない
      */
     public static function file(string $path, ?CsvConfig $config = null): static
     {
         if (!file_exists($path)) {
-            throw new InvalidArgumentException("CSVファイルが見つかりません: {$path}");
+            throw new CsvFileNotFoundException("CSVファイルが見つかりません: {$path}");
+        }
+
+        if (!is_readable($path)) {
+            throw new CsvFileNotReadableException("CSVファイルを読み取る権限がありません: {$path}");
         }
 
         $instance = new static($config ?? new CsvConfig());
@@ -88,6 +107,7 @@ class CsvReader
 
     public function delimiter(string $delimiter): static
     {
+        // CsvConfig コンストラクタ内でバリデーションされる（CsvConfigException）
         $this->config = $this->config->delimiter($delimiter);
         return $this;
     }
@@ -106,10 +126,19 @@ class CsvReader
 
     /**
      * エンコーディングを明示指定する（自動判定を上書き）。
-     * 'UTF-8' / 'SJIS-win' / 'eucJP-win' 等
+     *
+     * @param  string $encoding 'UTF-8' / 'SJIS-win' / 'eucJP-win' / 'ASCII'
+     * @throws \Wttks\Csv\Exceptions\CsvEncodingException 未対応のエンコーディングを指定した場合
      */
     public function encoding(string $encoding): static
     {
+        if (!in_array($encoding, self::VALID_ENCODINGS, true)) {
+            $valid = implode(', ', self::VALID_ENCODINGS);
+            throw new CsvEncodingException(
+                "未対応のエンコーディングです: \"{$encoding}\"。指定可能な値: {$valid}"
+            );
+        }
+
         $this->encoding = $encoding;
         return $this;
     }
@@ -122,18 +151,25 @@ class CsvReader
      *
      * 例:
      *   ->map([
-     *       // ヘッダー名 → 出力キー名
-     *       '氏名'   => 'name',
-     *       // ヘッダー名 → 値変換クロージャ（出力キーはヘッダー名のまま）
-     *       '金額'   => fn($v) => (int) $v,
-     *       // 列インデックス → 出力キー名
-     *       0 => 'name',
-     *       // 列インデックス → 値変換クロージャ（出力キーはインデックス番号）
-     *       2 => fn($v) => (int) $v,
+     *       '氏名'   => 'name',              // ヘッダー名 → 出力キー名
+     *       '金額'   => fn($v) => (int) $v,  // ヘッダー名 → 値変換（出力キーはヘッダー名のまま）
+     *       0        => 'name',              // 列インデックス → 出力キー名
+     *       2        => fn($v) => (int) $v,  // 列インデックス → 値変換（出力キーはインデックス番号）
      *   ])
+     *
+     * @throws \Wttks\Csv\Exceptions\CsvMappingException マップの値が文字列でもクロージャでもない場合
      */
     public function map(array $map): static
     {
+        foreach ($map as $source => $target) {
+            if (!is_string($target) && !($target instanceof \Closure)) {
+                $type = get_debug_type($target);
+                throw new CsvMappingException(
+                    "map() の値には文字列またはクロージャを指定してください。キー \"{$source}\" に {$type} が指定されています。"
+                );
+            }
+        }
+
         $this->map = $map;
         return $this;
     }
@@ -145,7 +181,7 @@ class CsvReader
     /**
      * 全行を Collection として返す。
      *
-     * @return Collection<int, array<string, mixed>>
+     * @return Collection<int, array<string|int, mixed>>
      */
     public function rows(): Collection
     {
@@ -155,7 +191,7 @@ class CsvReader
     /**
      * 1行ずつ処理する LazyCollection を返す（大きいファイル向け）。
      *
-     * @return LazyCollection<int, array<string, mixed>>
+     * @return LazyCollection<int, array<string|int, mixed>>
      */
     public function cursor(): LazyCollection
     {
@@ -171,7 +207,7 @@ class CsvReader
     /**
      * 全行を配列として読み込む。
      *
-     * @return array<int, array<string, mixed>>
+     * @return array<int, array<string|int, mixed>>
      */
     private function readAll(): array
     {
@@ -181,21 +217,38 @@ class CsvReader
     /**
      * ジェネレータで1行ずつ読み込む。
      *
-     * @return \Generator<int, array<string, mixed>>
+     * @return \Generator<int, array<string|int, mixed>>
      */
     private function readGenerator(): \Generator
     {
         $handle = $this->openHandle();
 
         try {
-            $headers = null;
+            $headers    = null;
+            $lineNumber = 0;
 
             while (true) {
-                $row = fgetcsv($handle, 0, $this->config->delimiter, $this->config->enclosure, $this->config->escape);
+                $row = fgetcsv(
+                    $handle,
+                    0,
+                    $this->config->delimiter,
+                    $this->config->enclosure,
+                    $this->config->escape
+                );
 
                 if ($row === false) {
+                    if (!feof($handle)) {
+                        // EOF ではなくエラーで false が返った
+                        throw new CsvParseException(
+                            $this->path !== null
+                                ? "CSVファイルの読み込み中にエラーが発生しました（{$lineNumber}行目付近）: {$this->path}"
+                                : "CSV文字列の読み込み中にエラーが発生しました（{$lineNumber}行目付近）"
+                        );
+                    }
                     break;
                 }
+
+                $lineNumber++;
 
                 // 空行をスキップ
                 if ($row === [null]) {
@@ -211,7 +264,7 @@ class CsvReader
                     continue;
                 }
 
-                yield $this->processRow($row, $headers);
+                yield $this->processRow($row, $headers, $lineNumber);
             }
         } finally {
             fclose($handle);
@@ -222,27 +275,29 @@ class CsvReader
      * ストリームハンドルを開く（エンコーディング変換込み）。
      *
      * @return resource
+     * @throws \Wttks\Csv\Exceptions\CsvFileNotReadableException ファイル読み込み失敗
+     * @throws \Wttks\Csv\Exceptions\CsvEncodingException        エンコーディング変換失敗
      */
     private function openHandle()
     {
-        // コンテンツを取得（ファイルまたは文字列）
         if ($this->path !== null) {
             $raw = file_get_contents($this->path);
             if ($raw === false) {
-                throw new RuntimeException("CSVファイルの読み込みに失敗しました: {$this->path}");
+                throw new CsvFileNotReadableException(
+                    "CSVファイルの読み込みに失敗しました: {$this->path}"
+                );
             }
         } else {
             $raw = $this->content ?? '';
         }
 
-        // UTF-8 に変換
         $utf8 = $this->convertToUtf8($raw);
 
-        // メモリストリームに書き込んで返す
         $handle = fopen('php://memory', 'r+');
         if ($handle === false) {
-            throw new RuntimeException('メモリストリームのオープンに失敗しました');
+            throw new CsvParseException('メモリストリームのオープンに失敗しました。');
         }
+
         fwrite($handle, $utf8);
         rewind($handle);
 
@@ -251,13 +306,13 @@ class CsvReader
 
     /**
      * 文字列を UTF-8 に変換する。
-     * BOM付きUTF-8 / SJIS-win / eucJP-win を自動判定する。
+     *
+     * @throws \Wttks\Csv\Exceptions\CsvEncodingException エンコーディング判定・変換失敗時
      */
     private function convertToUtf8(string $raw): string
     {
-        // BOM を除去しつつエンコーディングを特定
+        // UTF-8 BOM を検出して除去
         if (str_starts_with($raw, "\xEF\xBB\xBF")) {
-            // UTF-8 BOM
             return substr($raw, 3);
         }
 
@@ -269,7 +324,10 @@ class CsvReader
 
         $converted = mb_convert_encoding($raw, 'UTF-8', $encoding);
         if ($converted === false) {
-            throw new RuntimeException("エンコーディング変換に失敗しました: {$encoding} → UTF-8");
+            throw new CsvEncodingException(
+                "エンコーディング変換に失敗しました: {$encoding} → UTF-8"
+                . ($this->path !== null ? "（ファイル: {$this->path}）" : '')
+            );
         }
 
         return $converted;
@@ -277,6 +335,7 @@ class CsvReader
 
     /**
      * エンコーディングを自動判定する。
+     * 判定不能の場合は UTF-8 を返す。
      */
     private function detectEncoding(string $str): string
     {
@@ -292,22 +351,21 @@ class CsvReader
     /**
      * 1行分のデータを処理してキー付き配列に変換する。
      *
-     * @param  string[]               $row
-     * @param  string[]|null          $headers
+     * @param  string[]      $row
+     * @param  string[]|null $headers
+     * @param  int           $lineNumber エラーメッセージ用の行番号
      * @return array<string|int, mixed>
      */
-    private function processRow(array $row, ?array $headers): array
+    private function processRow(array $row, ?array $headers, int $lineNumber): array
     {
         // Excel数式形式を除去（="0120" → "0120"）
         $row = array_map(fn(string $v) => $this->stripExcelFormula($v), $row);
 
-        // ヘッダーなし: インデックス配列として返す
         if ($headers === null) {
             if (empty($this->map)) {
                 return $row;
             }
-            // インデックスベースのマッピングを適用
-            return $this->applyMap($row, assoc: null);
+            return $this->applyMap($row, assoc: null, lineNumber: $lineNumber);
         }
 
         // ヘッダーをキーにした連想配列に変換
@@ -316,49 +374,41 @@ class CsvReader
             $assoc[$header] = $row[$i] ?? '';
         }
 
-        // カラムマッピングが未設定: ヘッダー名をそのままキーに使う
         if (empty($this->map)) {
             return $assoc;
         }
 
-        return $this->applyMap($row, assoc: $assoc);
+        return $this->applyMap($row, assoc: $assoc, lineNumber: $lineNumber);
     }
 
     /**
      * カラムマッピングを適用して出力配列を返す。
      *
-     * map のキーは以下を受け付ける:
-     *   int    $index   → 0始まりの列インデックス（$row[$index] を使用）
-     *   string $header  → CSVヘッダー名（$assoc[$header] を使用）
-     *
-     * map の値は以下を受け付ける:
-     *   string  $outputKey → 出力配列のキー名
-     *   Closure            → 値変換クロージャ（出力キーはソース指定と同じ）
-     *
-     * @param  string[]                    $row    生行データ（インデックス配列）
-     * @param  array<string, string>|null  $assoc  ヘッダーキー付き配列（ヘッダーなしのときnull）
+     * @param  string[]                    $row
+     * @param  array<string, string>|null  $assoc
+     * @param  int                         $lineNumber
      * @return array<string|int, mixed>
+     * @throws \Wttks\Csv\Exceptions\CsvMappingException クロージャ内で例外が発生した場合
      */
-    private function applyMap(array $row, ?array $assoc): array
+    private function applyMap(array $row, ?array $assoc, int $lineNumber): array
     {
         $mapped = [];
 
         foreach ($this->map as $source => $target) {
-            // ソースの値を取得
-            if (is_int($source)) {
-                // 整数キー: 列インデックス指定
-                $value = $row[$source] ?? '';
-            } else {
-                // 文字列キー: ヘッダー名指定
-                $value = $assoc[$source] ?? '';
-            }
+            $value = is_int($source)
+                ? ($row[$source] ?? '')
+                : ($assoc[$source] ?? '');
 
-            // ターゲットの適用
             if ($target instanceof \Closure) {
-                // クロージャ: 値変換。出力キーはソース指定をそのまま使う
-                $mapped[$source] = $target($value);
+                try {
+                    $mapped[$source] = $target($value);
+                } catch (\Throwable $e) {
+                    throw new CsvMappingException(
+                        "マッピングのクロージャで例外が発生しました（{$lineNumber}行目、キー: \"{$source}\"）: {$e->getMessage()}",
+                        previous: $e
+                    );
+                }
             } else {
-                // 文字列: 出力キー名の変換
                 $mapped[$target] = $value;
             }
         }
@@ -368,7 +418,6 @@ class CsvReader
 
     /**
      * Excel数式形式（="..."）を除去して内側の値を返す。
-     * ="0120" → 0120、通常の値はそのまま返す。
      */
     private function stripExcelFormula(string $value): string
     {
@@ -376,7 +425,6 @@ class CsvReader
             return $value;
         }
 
-        // ="..." 形式にマッチする場合は中身を返す
         if (preg_match('/\A="(.*)"\z/s', $value, $m)) {
             return $m[1];
         }

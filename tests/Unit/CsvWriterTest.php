@@ -243,7 +243,7 @@ class CsvWriterTest extends TestCase
     #[Test]
     public function open前にaddを呼ぶと例外が発生する(): void
     {
-        $this->expectException(\RuntimeException::class);
+        $this->expectException(\Wttks\Csv\Exceptions\CsvStateException::class);
 
         CsvWriter::file('/tmp/test.csv')
             ->map(['氏名' => 'name'])

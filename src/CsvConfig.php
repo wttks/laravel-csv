@@ -2,6 +2,8 @@
 
 namespace Wttks\Csv;
 
+use Wttks\Csv\Exceptions\CsvConfigException;
+
 /**
  * CSV/TSV の読み書き設定クラス。
  *
@@ -14,6 +16,14 @@ namespace Wttks\Csv;
  */
 class CsvConfig
 {
+    /** 書き込みエンコーディングとして指定できる値 */
+    private const VALID_WRITE_ENCODINGS = [
+        'UTF-8-BOM',
+        'UTF-8',
+        'SJIS-win',
+        'eucJP-win',
+    ];
+
     public function __construct(
         /** 区切り文字（デフォルト: カンマ） */
         public readonly string $delimiter = ',',
@@ -42,7 +52,12 @@ class CsvConfig
 
         /** 1行目をヘッダー行として扱うか */
         public readonly bool $hasHeader = true,
-    ) {}
+    ) {
+        $this->validateDelimiter($delimiter);
+        $this->validateEnclosure($enclosure);
+        $this->validateEscape($escape);
+        $this->validateWriteEncoding($writeEncoding);
+    }
 
     /**
      * デフォルト設定（Excel互換）でインスタンスを生成する。
@@ -92,5 +107,59 @@ class CsvConfig
     public function hasHeader(bool $enabled = true): static
     {
         return new static($this->delimiter, $this->enclosure, $this->escape, $this->writeEncoding, $this->excelFormula, $enabled);
+    }
+
+    // =========================================================================
+    // バリデーション
+    // =========================================================================
+
+    private function validateDelimiter(string $delimiter): void
+    {
+        if ($delimiter === '') {
+            throw new CsvConfigException('区切り文字（delimiter）に空文字列は指定できません。');
+        }
+
+        if (mb_strlen($delimiter, 'UTF-8') !== 1) {
+            throw new CsvConfigException(
+                "区切り文字（delimiter）は1文字で指定してください。指定値: \"{$delimiter}\""
+            );
+        }
+    }
+
+    private function validateEnclosure(string $enclosure): void
+    {
+        if ($enclosure === '') {
+            throw new CsvConfigException('囲み文字（enclosure）に空文字列は指定できません。');
+        }
+
+        if (mb_strlen($enclosure, 'UTF-8') !== 1) {
+            throw new CsvConfigException(
+                "囲み文字（enclosure）は1文字で指定してください。指定値: \"{$enclosure}\""
+            );
+        }
+    }
+
+    private function validateEscape(string $escape): void
+    {
+        // 空文字列（Excel互換モード）は有効
+        if ($escape === '') {
+            return;
+        }
+
+        if (mb_strlen($escape, 'UTF-8') !== 1) {
+            throw new CsvConfigException(
+                "エスケープ文字（escape）は空文字列または1文字で指定してください。指定値: \"{$escape}\""
+            );
+        }
+    }
+
+    private function validateWriteEncoding(string $encoding): void
+    {
+        if (!in_array($encoding, self::VALID_WRITE_ENCODINGS, true)) {
+            $valid = implode(', ', self::VALID_WRITE_ENCODINGS);
+            throw new CsvConfigException(
+                "未対応の書き込みエンコーディングです: \"{$encoding}\"。指定可能な値: {$valid}"
+            );
+        }
     }
 }
