@@ -313,6 +313,62 @@ $rows[1]['コード']; // → '001'
 
 ---
 
+## 分割書き込み（open / add / close）
+
+大量データをチャンクに分けて書き込む場合や、ループ内で逐次書き込む場合に使います。
+
+```php
+$writer = CsvWriter::file('output.csv')
+    ->map(['氏名' => 'name', '年齢' => 'age'])
+    ->open();  // ファイルを開き、ヘッダー行を書き出す
+
+// チャンクごとに追記
+foreach ($chunks as $chunk) {
+    $writer->add($chunk);
+}
+
+$writer->close();  // ファイルを閉じる
+```
+
+| メソッド | 説明 |
+|---|---|
+| `open()` | ファイルを開いてヘッダー行を書き出す |
+| `add($rows)` | データ行を追記する（複数回呼び出し可能） |
+| `close()` | ファイルを閉じる |
+
+> **注意:** `open()` の後に `delimiter()` などの設定変更メソッドを呼ぶと `CsvStateException` が発生します。
+> `add()` は `open()` の前に呼ぶと `CsvStateException` が発生します。
+
+---
+
+## 例外クラス
+
+すべての例外は `Wttks\Csv\Exceptions\CsvException` を基底クラスとして継承しています。
+
+```php
+use Wttks\Csv\Exceptions\CsvException;
+
+try {
+    $rows = CsvReader::file('data.csv')->rows();
+} catch (CsvException $e) {
+    // すべてのCSV例外をまとめて捕捉
+}
+```
+
+| 例外クラス | 発生タイミング |
+|---|---|
+| `CsvException` | すべての例外の基底クラス |
+| `CsvConfigException` | delimiter・enclosure などに不正な値を指定した場合 |
+| `CsvFileNotFoundException` | 読み込みファイルが存在しない場合 |
+| `CsvFileNotReadableException` | 読み込みファイルに読み取り権限がない場合 |
+| `CsvFileNotWritableException` | 書き込み先ディレクトリが存在しない、または書き込み権限がない場合 |
+| `CsvEncodingException` | 未対応エンコーディングの指定、またはエンコーディング変換に失敗した場合 |
+| `CsvParseException` | CSV解析中にエラーが発生した場合（破損ファイル等） |
+| `CsvMappingException` | `map()` のクロージャ内で例外が発生した場合 |
+| `CsvStateException` | 不正な呼び出し順序（`open()` 後の設定変更、`open()` 前の `add()` 等） |
+
+---
+
 ## テスト
 
 ```bash
