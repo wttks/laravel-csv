@@ -122,6 +122,21 @@ class CsvReaderTest extends TestCase
         $this->assertSame('1234567', $rows[0]['郵便番号']); // クロージャはキー名がヘッダー名になる
     }
 
+    #[Test]
+    public function クロージャの第2引数で行全体の連想配列を受け取れる(): void
+    {
+        $rows = CsvReader::file("{$this->fixtures}/split_name.csv")
+            ->map([
+                '姓' => fn($v, $row) => $row['姓'] . $row['名'], // 複数列を結合
+                '電話番号' => fn($v) => str_replace('-', '', $v),
+            ])
+            ->rows();
+
+        $this->assertSame('山田太郎', $rows[0]['姓']);
+        $this->assertSame('鈴木花子', $rows[1]['姓']);
+        $this->assertSame('09012345678', $rows[0]['電話番号']);
+    }
+
     // =========================================================================
     // Excel数式形式
     // =========================================================================

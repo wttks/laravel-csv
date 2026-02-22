@@ -152,9 +152,10 @@ class CsvReader
      * 例:
      *   ->map([
      *       '氏名'   => 'name',              // ヘッダー名 → 出力キー名
-     *       '金額'   => fn($v) => (int) $v,  // ヘッダー名 → 値変換（出力キーはヘッダー名のまま）
-     *       0        => 'name',              // 列インデックス → 出力キー名
-     *       2        => fn($v) => (int) $v,  // 列インデックス → 値変換（出力キーはインデックス番号）
+     *       '金額'   => fn($v) => (int) $v,                          // ヘッダー名 → 値変換（出力キーはヘッダー名のまま）
+     *       '姓'     => fn($v, $row) => $row['姓'] . $row['名'],    // 複数列をまとめる（$row は連想配列）
+     *       0        => 'name',                                      // 列インデックス → 出力キー名
+     *       2        => fn($v) => (int) $v,                          // 列インデックス → 値変換（出力キーはインデックス番号）
      *   ])
      *
      * @throws \Wttks\Csv\Exceptions\CsvMappingException マップの値が文字列でもクロージャでもない場合
@@ -401,7 +402,7 @@ class CsvReader
 
             if ($target instanceof \Closure) {
                 try {
-                    $mapped[$source] = $target($value);
+                    $mapped[$source] = $target($value, $assoc ?? $row);
                 } catch (\Throwable $e) {
                     throw new CsvMappingException(
                         "マッピングのクロージャで例外が発生しました（{$lineNumber}行目、キー: \"{$source}\"）: {$e->getMessage()}",
