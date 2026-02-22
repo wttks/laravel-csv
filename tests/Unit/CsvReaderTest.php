@@ -187,6 +187,36 @@ class CsvReaderTest extends TestCase
     }
 
     #[Test]
+    public function eachで行ごとに処理できる(): void
+    {
+        $names = [];
+
+        CsvReader::file("{$this->fixtures}/simple_utf8.csv")
+            ->each(function ($row) use (&$names) {
+                $names[] = $row['氏名'];
+            });
+
+        $this->assertSame(['山田太郎', '鈴木花子'], $names);
+    }
+
+    #[Test]
+    public function eachはmapとtransformを経由して渡される(): void
+    {
+        $objects = [];
+
+        CsvReader::file("{$this->fixtures}/split_name.csv")
+            ->map(['name' => fn($v, $row) => $row['姓'] . ' ' . $row['名']])
+            ->transform(fn($row) => (object) $row)
+            ->each(function ($obj) use (&$objects) {
+                $objects[] = $obj;
+            });
+
+        $this->assertInstanceOf(\stdClass::class, $objects[0]);
+        $this->assertSame('山田 太郎', $objects[0]->name);
+        $this->assertCount(2, $objects);
+    }
+
+    #[Test]
     public function transformはcursorでも動作する(): void
     {
         $results = CsvReader::file("{$this->fixtures}/simple_utf8.csv")

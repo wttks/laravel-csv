@@ -214,6 +214,23 @@ class CsvReader
     }
 
     /**
+     * 全行に対してクロージャを実行する。戻り値は返さない。
+     * cursor() ベースのため大きいファイルでもメモリ効率が良い。
+     * transform() が設定されている場合は変換後の値が渡される。
+     *
+     * 例:
+     *   ->each(function ($row) use ($service) { $service->import($row); })
+     *
+     * @param \Closure(mixed): void $callback
+     */
+    public function each(\Closure $callback): void
+    {
+        foreach ($this->cursor() as $row) {
+            $callback($row);
+        }
+    }
+
+    /**
      * 1行ずつ処理する LazyCollection を返す（大きいファイル向け）。
      * transform() が設定されている場合は変換後の値の LazyCollection になる。
      *
