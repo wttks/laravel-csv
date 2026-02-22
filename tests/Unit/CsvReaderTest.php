@@ -155,6 +155,49 @@ class CsvReaderTest extends TestCase
     }
 
     // =========================================================================
+    // transform
+    // =========================================================================
+
+    #[Test]
+    public function transformで行全体をオブジェクトに変換できる(): void
+    {
+        $rows = CsvReader::file("{$this->fixtures}/simple_utf8.csv")
+            ->transform(fn($row) => (object) $row)
+            ->rows();
+
+        $this->assertInstanceOf(\stdClass::class, $rows[0]);
+        $this->assertSame('山田太郎', $rows[0]->氏名);
+        $this->assertSame('123-4567', $rows[0]->郵便番号);
+    }
+
+    #[Test]
+    public function mapしてからtransformできる(): void
+    {
+        $rows = CsvReader::file("{$this->fixtures}/split_name.csv")
+            ->map([
+                'name'  => fn($v, $row) => $row['姓'] . ' ' . $row['名'],
+                '電話番号' => fn($v) => str_replace('-', '', $v),
+            ])
+            ->transform(fn($row) => (object) $row)
+            ->rows();
+
+        $this->assertInstanceOf(\stdClass::class, $rows[0]);
+        $this->assertSame('山田 太郎', $rows[0]->name);
+        $this->assertSame('09012345678', $rows[0]->電話番号);
+    }
+
+    #[Test]
+    public function transformはcursorでも動作する(): void
+    {
+        $results = CsvReader::file("{$this->fixtures}/simple_utf8.csv")
+            ->transform(fn($row) => $row['氏名'])
+            ->cursor()
+            ->all();
+
+        $this->assertSame(['山田太郎', '鈴木花子'], $results);
+    }
+
+    // =========================================================================
     // Excel数式形式
     // =========================================================================
 

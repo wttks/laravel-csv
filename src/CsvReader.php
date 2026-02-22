@@ -55,6 +55,11 @@ class CsvReader
      */
     private array $map = [];
 
+    /**
+     * 行変換クロージャ（map() 適用後の行全体を任意の値に変換する）。
+     */
+    private ?\Closure $transform = null;
+
     private function __construct(CsvConfig $config)
     {
         $this->config = $config;
@@ -175,14 +180,33 @@ class CsvReader
         return $this;
     }
 
+    /**
+     * 行全体を受け取って任意の値に変換するクロージャを設定する。
+     *
+     * map() が設定されている場合は map() 適用後の配列が渡される。
+     * map() なしの場合はヘッダー付き連想配列（またはインデックス配列）が渡される。
+     *
+     * 例:
+     *   ->transform(fn($row) => new StaffData($row['姓'], $row['名']))
+     *   ->transform(fn($row) => array_values($row))  // 値だけの配列に変換
+     *
+     * @param  \Closure(array<string|int, mixed>): mixed $closure
+     */
+    public function transform(\Closure $closure): static
+    {
+        $this->transform = $closure;
+        return $this;
+    }
+
     // =========================================================================
     // 読み込み
     // =========================================================================
 
     /**
      * 全行を Collection として返す。
+     * transform() が設定されている場合は変換後の値の Collection になる。
      *
-     * @return Collection<int, array<string|int, mixed>>
+     * @return Collection<int, mixed>
      */
     public function rows(): Collection
     {
@@ -191,8 +215,9 @@ class CsvReader
 
     /**
      * 1行ずつ処理する LazyCollection を返す（大きいファイル向け）。
+     * transform() が設定されている場合は変換後の値の LazyCollection になる。
      *
-     * @return LazyCollection<int, array<string|int, mixed>>
+     * @return LazyCollection<int, mixed>
      */
     public function cursor(): LazyCollection
     {
@@ -355,18 +380,18 @@ class CsvReader
      * @param  string[]      $row
      * @param  string[]|null $headers
      * @param  int           $lineNumber エラーメッセージ用の行番号
-     * @return array<string|int, mixed>
+     * @return mixed
      */
-    private function processRow(array $row, ?array $headers, int $lineNumber): array
+    private function processRow(array $row, ?array $headers, int $lineNumber): mixed
     {
         // Excel数式形式を除去（="0120" → "0120"）
         $row = array_map(fn(string $v) => $this->stripExcelFormula($v), $row);
 
         if ($headers === null) {
             if (empty($this->map)) {
-                return $row;
+                return $this->applyTransform($row);
             }
-            return $this->applyMap($row, assoc: null, lineNumber: $lineNumber);
+            return $this->applyTransform($this->applyMap($row, assoc: null, lineNumber: $lineNumber));
         }
 
         // ヘッダーをキーにした連想配列に変換
@@ -376,10 +401,10 @@ class CsvReader
         }
 
         if (empty($this->map)) {
-            return $assoc;
+            return $this->applyTransform($assoc);
         }
 
-        return $this->applyMap($row, assoc: $assoc, lineNumber: $lineNumber);
+        return $this->applyTransform($this->applyMap($row, assoc: $assoc, lineNumber: $lineNumber));
     }
 
     /**
@@ -415,6 +440,21 @@ class CsvReader
         }
 
         return $mapped;
+    }
+
+    /**
+     * transform クロージャが設定されていれば適用して返す。
+     *
+     * @param  array<string|int, mixed> $row
+     * @return mixed
+     */
+    private function applyTransform(array $row): mixed
+    {
+        if ($this->transform === null) {
+            return $row;
+        }
+
+        return ($this->transform)($row);
     }
 
     /**
