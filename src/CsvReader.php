@@ -13,16 +13,16 @@ use Wttks\Csv\Exceptions\CsvParseException;
 /**
  * CSV/TSV ファイルまたは文字列の読み込みクラス。
  *
+ * 処理の適用順: map() → filter() → when() → transform()
+ *
  * 使用例:
- *   // ファイルから読み込み（エンコーディング自動判定）
  *   $rows = CsvReader::file('data.csv')
  *       ->map(['氏名' => 'name', '電話番号' => 'phone'])
+ *       ->filter(fn($row) => $row['name'] !== '')
+ *       ->transform(fn($row) => new StaffData($row))
  *       ->rows();
  *
- *   // ストリーミング読み込み（大きいファイル向け）
- *   foreach (CsvReader::file('large.csv')->cursor() as $row) {
- *       // 1行ずつ処理
- *   }
+ *   foreach (CsvReader::file('large.csv')->cursor() as $row) { ... }
  *
  * @throws \Wttks\Csv\Exceptions\CsvFileNotFoundException     ファイルが見つからない
  * @throws \Wttks\Csv\Exceptions\CsvFileNotReadableException  読み取り権限がない
@@ -55,9 +55,17 @@ class CsvReader
      */
     private array $map = [];
 
+    /** フィルタクロージャ（map() 適用後の行を受け取り bool を返す） */
+    private ?\Closure $filter = null;
+
     /**
-     * 行変換クロージャ（map() 適用後の行全体を任意の値に変換する）。
+     * 条件分岐。[condition, then, else?] の配列のリスト。
+     *
+     * @var array<int, array{0: \Closure, 1: \Closure, 2: \Closure|null}>
      */
+    private array $whenClauses = [];
+
+    /** 行変換クロージャ（when() 適用後の行全体を任意の値に変換する） */
     private ?\Closure $transform = null;
 
     private function __construct(CsvConfig $config)
@@ -87,6 +95,7 @@ class CsvReader
 
         $instance = new static($config ?? new CsvConfig());
         $instance->path = $path;
+
         return $instance;
     }
 
@@ -97,6 +106,7 @@ class CsvReader
     {
         $instance = new static($config ?? new CsvConfig());
         $instance->content = $content;
+
         return $instance;
     }
 
@@ -107,6 +117,7 @@ class CsvReader
     public function config(CsvConfig $config): static
     {
         $this->config = $config;
+
         return $this;
     }
 
@@ -114,18 +125,21 @@ class CsvReader
     {
         // CsvConfig コンストラクタ内でバリデーションされる（CsvConfigException）
         $this->config = $this->config->delimiter($delimiter);
+
         return $this;
     }
 
     public function enclosure(string $enclosure): static
     {
         $this->config = $this->config->enclosure($enclosure);
+
         return $this;
     }
 
     public function hasHeader(bool $enabled = true): static
     {
         $this->config = $this->config->hasHeader($enabled);
+
         return $this;
     }
 
@@ -145,6 +159,7 @@ class CsvReader
         }
 
         $this->encoding = $encoding;
+
         return $this;
     }
 
@@ -154,13 +169,16 @@ class CsvReader
      * キーにはヘッダー名（文字列）または列インデックス（0始まりの整数）を指定できる。
      * 値には出力キー名（文字列）または値変換クロージャを指定できる。
      *
+     * クロージャのシグネチャ: fn($value, $row) => ...
+     *   $value: その列の値
+     *   $row:   行全体の連想配列（ヘッダーなしの場合はインデックス配列）
+     *
      * 例:
      *   ->map([
-     *       '氏名'   => 'name',              // ヘッダー名 → 出力キー名
-     *       '金額'   => fn($v) => (int) $v,                          // ヘッダー名 → 値変換（出力キーはヘッダー名のまま）
-     *       '姓'     => fn($v, $row) => $row['姓'] . $row['名'],    // 複数列をまとめる（$row は連想配列）
-     *       0        => 'name',                                      // 列インデックス → 出力キー名
-     *       2        => fn($v) => (int) $v,                          // 列インデックス → 値変換（出力キーはインデックス番号）
+     *       '氏名'   => 'name',                                    // リネーム
+     *       '金額'   => fn($v) => (int) $v,                        // 値変換
+     *       '姓'     => fn($v, $row) => $row['姓'] . $row['名'],   // 複数列を結合
+     *       'code'   => fn($v, $row) => $row['prefix'].$row['id'], // 新規列を追加
      *   ])
      *
      * @throws \Wttks\Csv\Exceptions\CsvMappingException マップの値が文字列でもクロージャでもない場合
@@ -177,24 +195,69 @@ class CsvReader
         }
 
         $this->map = $map;
+
+        return $this;
+    }
+
+    /**
+     * 行をフィルタするクロージャを設定する。
+     *
+     * map() 適用後の行が渡される。false を返した行はスキップされる。
+     *
+     * 例:
+     *   ->filter(fn($row) => $row['金額'] > 0)
+     *   ->filter(fn($row) => $row['name'] !== '')
+     *
+     * @param \Closure(array<string|int, mixed>): bool $closure
+     */
+    public function filter(\Closure $closure): static
+    {
+        $this->filter = $closure;
+
+        return $this;
+    }
+
+    /**
+     * 行の条件によって変換処理を分岐する。複数回呼び出し可能（先にマッチした節が適用される）。
+     *
+     * filter() 適用後の行が渡される。
+     * $then / $otherwise の戻り値が次の処理（transform または出力）に渡される。
+     * $otherwise を省略した場合、条件が false の行は元の行配列のまま渡される。
+     *
+     * 例:
+     *   ->when(
+     *       fn($row) => $row['type'] === 'A',
+     *       fn($row) => new TypeAData($row),
+     *       fn($row) => new TypeBData($row),
+     *   )
+     *
+     * @param \Closure(array<string|int, mixed>): bool  $condition
+     * @param \Closure(array<string|int, mixed>): mixed $then
+     * @param \Closure(mixed): mixed|null               $otherwise
+     */
+    public function when(\Closure $condition, \Closure $then, ?\Closure $otherwise = null): static
+    {
+        $this->whenClauses[] = [$condition, $then, $otherwise];
+
         return $this;
     }
 
     /**
      * 行全体を受け取って任意の値に変換するクロージャを設定する。
      *
+     * when() が設定されている場合は when() 適用後の値が渡される。
      * map() が設定されている場合は map() 適用後の配列が渡される。
-     * map() なしの場合はヘッダー付き連想配列（またはインデックス配列）が渡される。
      *
      * 例:
      *   ->transform(fn($row) => new StaffData($row['姓'], $row['名']))
-     *   ->transform(fn($row) => array_values($row))  // 値だけの配列に変換
+     *   ->transform(fn($row) => array_values($row))
      *
-     * @param  \Closure(array<string|int, mixed>): mixed $closure
+     * @param \Closure(mixed): mixed $closure
      */
     public function transform(\Closure $closure): static
     {
         $this->transform = $closure;
+
         return $this;
     }
 
@@ -204,7 +267,6 @@ class CsvReader
 
     /**
      * 全行を Collection として返す。
-     * transform() が設定されている場合は変換後の値の Collection になる。
      *
      * @return Collection<int, mixed>
      */
@@ -216,7 +278,6 @@ class CsvReader
     /**
      * 全行に対してクロージャを実行する。戻り値は返さない。
      * cursor() ベースのため大きいファイルでもメモリ効率が良い。
-     * transform() が設定されている場合は変換後の値が渡される。
      *
      * 例:
      *   ->each(function ($row) use ($service) { $service->import($row); })
@@ -232,7 +293,6 @@ class CsvReader
 
     /**
      * 1行ずつ処理する LazyCollection を返す（大きいファイル向け）。
-     * transform() が設定されている場合は変換後の値の LazyCollection になる。
      *
      * @return LazyCollection<int, mixed>
      */
@@ -250,7 +310,7 @@ class CsvReader
     /**
      * 全行を配列として読み込む。
      *
-     * @return array<int, array<string|int, mixed>>
+     * @return array<int, mixed>
      */
     private function readAll(): array
     {
@@ -259,8 +319,9 @@ class CsvReader
 
     /**
      * ジェネレータで1行ずつ読み込む。
+     * 適用順: map → filter → when → transform
      *
-     * @return \Generator<int, array<string|int, mixed>>
+     * @return \Generator<int, mixed>
      */
     private function readGenerator(): \Generator
     {
@@ -307,7 +368,19 @@ class CsvReader
                     continue;
                 }
 
-                yield $this->processRow($row, $headers, $lineNumber);
+                // map()
+                $mapped = $this->applyMap($row, $headers, $lineNumber);
+
+                // filter()
+                if ($this->filter !== null && !($this->filter)($mapped)) {
+                    continue;
+                }
+
+                // when()
+                $value = $this->applyWhen($mapped);
+
+                // transform()
+                yield $this->transform !== null ? ($this->transform)($value) : $value;
             }
         } finally {
             fclose($handle);
@@ -392,49 +465,31 @@ class CsvReader
     }
 
     /**
-     * 1行分のデータを処理してキー付き配列に変換する。
+     * map() を適用してキー付き配列を返す。map が未設定の場合は元の行をそのまま返す。
      *
      * @param  string[]      $row
      * @param  string[]|null $headers
-     * @param  int           $lineNumber エラーメッセージ用の行番号
-     * @return mixed
+     * @param  int           $lineNumber
+     * @return array<string|int, mixed>
      */
-    private function processRow(array $row, ?array $headers, int $lineNumber): mixed
+    private function applyMap(array $row, ?array $headers, int $lineNumber): array
     {
         // Excel数式形式を除去（="0120" → "0120"）
         $row = array_map(fn(string $v) => $this->stripExcelFormula($v), $row);
 
-        if ($headers === null) {
-            if (empty($this->map)) {
-                return $this->applyTransform($row);
-            }
-            return $this->applyTransform($this->applyMap($row, assoc: null, lineNumber: $lineNumber));
-        }
-
         // ヘッダーをキーにした連想配列に変換
-        $assoc = [];
-        foreach ($headers as $i => $header) {
-            $assoc[$header] = $row[$i] ?? '';
+        $assoc = null;
+        if ($headers !== null) {
+            $assoc = [];
+            foreach ($headers as $i => $header) {
+                $assoc[$header] = $row[$i] ?? '';
+            }
         }
 
         if (empty($this->map)) {
-            return $this->applyTransform($assoc);
+            return $assoc ?? $row;
         }
 
-        return $this->applyTransform($this->applyMap($row, assoc: $assoc, lineNumber: $lineNumber));
-    }
-
-    /**
-     * カラムマッピングを適用して出力配列を返す。
-     *
-     * @param  string[]                    $row
-     * @param  array<string, string>|null  $assoc
-     * @param  int                         $lineNumber
-     * @return array<string|int, mixed>
-     * @throws \Wttks\Csv\Exceptions\CsvMappingException クロージャ内で例外が発生した場合
-     */
-    private function applyMap(array $row, ?array $assoc, int $lineNumber): array
-    {
         $mapped = [];
 
         foreach ($this->map as $source => $target) {
@@ -460,18 +515,25 @@ class CsvReader
     }
 
     /**
-     * transform クロージャが設定されていれば適用して返す。
+     * when() 節を順に評価し、最初にマッチした then/otherwise の戻り値を返す。
+     * どの条件にもマッチしない場合は元の配列をそのまま返す。
      *
      * @param  array<string|int, mixed> $row
      * @return mixed
      */
-    private function applyTransform(array $row): mixed
+    private function applyWhen(array $row): mixed
     {
-        if ($this->transform === null) {
-            return $row;
+        foreach ($this->whenClauses as [$condition, $then, $otherwise]) {
+            if (($condition)($row)) {
+                return ($then)($row);
+            }
+
+            if ($otherwise !== null) {
+                return ($otherwise)($row);
+            }
         }
 
-        return ($this->transform)($row);
+        return $row;
     }
 
     /**

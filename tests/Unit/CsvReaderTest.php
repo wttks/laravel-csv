@@ -155,6 +155,86 @@ class CsvReaderTest extends TestCase
     }
 
     // =========================================================================
+    // filter
+    // =========================================================================
+
+    #[Test]
+    public function filterで条件に合わない行をスキップできる(): void
+    {
+        $rows = CsvReader::file("{$this->fixtures}/simple_utf8.csv")
+            ->filter(fn($row) => $row['氏名'] === '山田太郎')
+            ->rows();
+
+        $this->assertCount(1, $rows);
+        $this->assertSame('山田太郎', $rows[0]['氏名']);
+    }
+
+    #[Test]
+    public function filterはmap適用後の値で判定する(): void
+    {
+        $rows = CsvReader::file("{$this->fixtures}/simple_utf8.csv")
+            ->map(['郵便番号' => fn($v) => str_replace('-', '', $v)])
+            ->filter(fn($row) => $row['郵便番号'] === '1234567')
+            ->rows();
+
+        $this->assertCount(1, $rows);
+        $this->assertSame('1234567', $rows[0]['郵便番号']);
+    }
+
+    // =========================================================================
+    // when
+    // =========================================================================
+
+    #[Test]
+    public function whenで条件によって変換を分岐できる(): void
+    {
+        $rows = CsvReader::file("{$this->fixtures}/simple_utf8.csv")
+            ->when(
+                fn($row) => $row['氏名'] === '山田太郎',
+                fn($row) => ['name' => $row['氏名'], 'type' => 'yamada'],
+                fn($row) => ['name' => $row['氏名'], 'type' => 'other'],
+            )
+            ->rows();
+
+        $this->assertSame('yamada', $rows[0]['type']);
+        $this->assertSame('other', $rows[1]['type']);
+    }
+
+    #[Test]
+    public function whenのotherwiseを省略した場合は元の行をそのまま返す(): void
+    {
+        $rows = CsvReader::file("{$this->fixtures}/simple_utf8.csv")
+            ->when(
+                fn($row) => $row['氏名'] === '山田太郎',
+                fn($row) => ['name' => $row['氏名'], 'type' => 'yamada'],
+            )
+            ->rows();
+
+        $this->assertSame('yamada', $rows[0]['type']);
+        // otherwise なし → 元の行配列
+        $this->assertArrayHasKey('氏名', $rows[1]);
+        $this->assertSame('鈴木花子', $rows[1]['氏名']);
+    }
+
+    #[Test]
+    public function whenは複数回チェーンでき先にマッチした節が適用される(): void
+    {
+        $rows = CsvReader::file("{$this->fixtures}/simple_utf8.csv")
+            ->when(
+                fn($row) => $row['氏名'] === '山田太郎',
+                fn($row) => 'yamada',
+            )
+            ->when(
+                fn($row) => is_array($row) && $row['氏名'] === '鈴木花子',
+                fn($row) => 'suzuki',
+            )
+            ->rows();
+
+        $this->assertSame('yamada', $rows[0]);
+        $this->assertSame('suzuki', $rows[1]);
+    }
+
+    // =========================================================================
     // transform
     // =========================================================================
 
