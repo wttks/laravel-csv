@@ -137,6 +137,23 @@ class CsvReaderTest extends TestCase
         $this->assertSame('09012345678', $rows[0]['電話番号']);
     }
 
+    #[Test]
+    public function クロージャでCSVに存在しない新しい列を追加できる(): void
+    {
+        $rows = CsvReader::file("{$this->fixtures}/split_name.csv")
+            ->map([
+                'full_name' => fn($v, $row) => $row['姓'] . ' ' . $row['名'], // 新規列
+                '電話番号'  => 'phone',
+            ])
+            ->rows();
+
+        $this->assertArrayHasKey('full_name', $rows[0]);
+        $this->assertArrayNotHasKey('姓', $rows[0]);
+        $this->assertSame('山田 太郎', $rows[0]['full_name']);
+        $this->assertSame('鈴木 花子', $rows[1]['full_name']);
+        $this->assertSame('090-1234-5678', $rows[0]['phone']);
+    }
+
     // =========================================================================
     // Excel数式形式
     // =========================================================================
